@@ -1,89 +1,80 @@
+//go:build windows
 // +build windows
 
 package containerd
 
 import (
-	"context"
-	"io/ioutil"
-	"os"
-	"time"
+	"net"
 
-	"github.com/rancher/k3s/pkg/agent/templates"
-	util2 "github.com/rancher/k3s/pkg/agent/util"
-	"github.com/rancher/k3s/pkg/daemons/config"
-	"github.com/rancher/wharfie/pkg/registries"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/k3s-io/k3s/pkg/agent/templates"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
+	util3 "github.com/k3s-io/k3s/pkg/util"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"google.golang.org/grpc"
-	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
-	"k8s.io/kubernetes/pkg/kubelet/util"
+	"k8s.io/cri-client/pkg/util"
 )
+
+// hostDirectory returns the name of the host dir for a given registry.
+// Colons are not allowed in windows paths, so convert `:port` to `_port_`.
+// Ref: https://github.com/containerd/containerd/blob/v1.7.25/remotes/docker/config/hosts.go#L291-L298
+func hostDirectory(host string) string {
+	if host, port, err := net.SplitHostPort(host); err == nil && port != "" {
+		return host + "_" + port + "_"
+	}
+	return host
+}
 
 func getContainerdArgs(cfg *config.Node) []string {
 	args := []string{
 		"containerd",
 		"-c", cfg.Containerd.Config,
 	}
+	// The legacy version 2 windows containerd config template did include
+	// address/state/root settings, so they do not need to be passed on the command line.
 	return args
 }
 
-// setupContainerdConfig generates the containerd.toml, using a template combined with various
+// SetupContainerdConfig generates the containerd.toml, using a template combined with various
 // runtime configurations and registry mirror settings provided by the administrator.
-func setupContainerdConfig(ctx context.Context, cfg *config.Node) error {
-	privRegistries, err := registries.GetPrivateRegistries(cfg.AgentConfig.PrivateRegistry)
-	if err != nil {
-		return err
-	}
-
+func SetupContainerdConfig(cfg *config.Node) error {
 	if cfg.SELinux {
 		logrus.Warn("SELinux isn't supported on windows")
 	}
 
-	var containerdTemplate string
-
+	cfg.DefaultRuntime = "runhcs-wcow-process"
+	cfg.AgentConfig.Snapshotter = "windows"
 	containerdConfig := templates.ContainerdConfig{
 		NodeConfig:            cfg,
 		DisableCgroup:         true,
-		IsRunningInUserNS:     false,
-		PrivateRegistryConfig: privRegistries.Registry(),
+		PrivateRegistryConfig: cfg.AgentConfig.Registry,
+		NoDefaultEndpoint:     cfg.Containerd.NoDefault,
 	}
 
-	containerdTemplateBytes, err := ioutil.ReadFile(cfg.Containerd.Template)
-	if err == nil {
-		logrus.Infof("Using containerd template at %s", cfg.Containerd.Template)
-		containerdTemplate = string(containerdTemplateBytes)
-	} else if os.IsNotExist(err) {
-		containerdTemplate = templates.ContainerdConfigTemplate
-	} else {
-		return err
-	}
-	parsedTemplate, err := templates.ParseTemplateFromConfig(containerdTemplate, containerdConfig)
-	if err != nil {
+	if err := writeContainerdConfig(cfg, containerdConfig); err != nil {
 		return err
 	}
 
-	return util2.WriteFile(cfg.Containerd.Config, parsedTemplate)
+	return writeContainerdHosts(cfg, containerdConfig)
 }
 
-// criConnection connects to a CRI socket at the given path.
-func CriConnection(ctx context.Context, address string) (*grpc.ClientConn, error) {
-	addr, dialer, err := util.GetAddressAndDialer(address)
+func Client(address string) (*containerd.Client, error) {
+	addr, _, err := util.GetAddressAndDialer(address)
 	if err != nil {
 		return nil, err
 	}
 
-	conn, err := grpc.Dial(addr, grpc.WithInsecure(), grpc.WithTimeout(3*time.Second), grpc.WithContextDialer(dialer), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxMsgSize)))
-	if err != nil {
-		return nil, err
-	}
+	return containerd.New(addr)
+}
 
-	c := runtimeapi.NewRuntimeServiceClient(conn)
-	_, err = c.Version(ctx, &runtimeapi.VersionRequest{
-		Version: "0.1.0",
-	})
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
+func OverlaySupported(root string) error {
+	return errors.Wrapf(util3.ErrUnsupportedPlatform, "overlayfs is not supported")
+}
 
-	return conn, nil
+func FuseoverlayfsSupported(root string) error {
+	return errors.Wrapf(util3.ErrUnsupportedPlatform, "fuse-overlayfs is not supported")
+}
+
+func StargzSupported(root string) error {
+	return errors.Wrapf(util3.ErrUnsupportedPlatform, "stargz is not supported")
 }

@@ -1,11 +1,11 @@
-// +build linux,cgo
+//go:build linux && cgo
 
 package cmds
 
 import (
 	"os"
 
-	"github.com/containerd/containerd/pkg/userns"
+	"github.com/moby/sys/userns"
 	"github.com/pkg/errors"
 	"github.com/rootless-containers/rootlesskit/pkg/parent/cgrouputil"
 )
